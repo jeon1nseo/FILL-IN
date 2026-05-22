@@ -1,0 +1,5 @@
+yolov8n.pt
+*.pt
+__pycache__/
+*.pyc
+.DS_Store
