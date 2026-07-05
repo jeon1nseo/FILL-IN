@@ -26,7 +26,7 @@ YOLOv8 + OpenCV를 활용하여 100mL 공병의 충진량을 실시간으로 감
 ## 설치
 
 ```bash
-pip install ultralytics opencv-python numpy
+pip install ultralytics opencv-python numpy flask
 ```
 
 ## 실행
@@ -34,4 +34,7 @@ pip install ultralytics opencv-python numpy
 ```bash
 python3 fill_detector.py
 ```
+
+젯슨(SSH 원격 접속 등 헤드리스 환경)에서는 카메라 화면이 뜨는 대신, 웹 브라우저에서
+`http://<젯슨 IP>:5000` 으로 접속하면 실시간 감지 화면을 볼 수 있습니다.
 
