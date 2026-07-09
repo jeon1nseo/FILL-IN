@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from flask import Flask, Response
 
 # 사전학습 모델 (첫 실행 시 자동 다운로드 ~6MB)
 model = YOLO('yolov8n.pt')
@@ -51,45 +50,68 @@ def draw_fill_bar(frame, x2, y1, y2, fill):
     cv2.line(frame, (bar_x - 3, threshold_y), (bar_x + bar_w + 3, threshold_y), (0, 165, 255), 1)
 
 
-def open_camera():
-    """젯슨 CSI 카메라(라즈베리파이 카메라 모듈) 우선 시도, 실패 시 USB 웹캠으로 폴백"""
-    gst_pipeline = (
-        "nvarguscamerasrc sensor-id=0 ! "
+def _gst_pipeline(sensor_id):
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
         "video/x-raw(memory:NVMM), width=1280, height=720, framerate=30/1, format=NV12 ! "
         "nvvidconv flip-method=0 ! "
         "video/x-raw, width=1280, height=720, format=BGRx ! "
         "videoconvert ! "
         "video/x-raw, format=BGR ! appsink drop=1"
     )
-    cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-    if cap.isOpened():
-        print("[CAMERA] CSI 카메라(nvarguscamerasrc) 연결됨")
-        return cap
+
+
+def open_camera():
+    """젯슨 CSI 카메라(라즈베리파이 카메라 모듈) 우선 시도, 실패 시 USB 웹캠으로 폴백"""
+    # CSI 포트 0, 1 순서로 시도 (실제 프레임이 나오는지까지 확인)
+    for sensor_id in (0, 1):
+        cap = cv2.VideoCapture(_gst_pipeline(sensor_id), cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                print(f"[CAMERA] CSI 카메라(nvarguscamerasrc) 연결됨 - sensor-id={sensor_id}")
+                return cap
+        cap.release()
+        print(f"[CAMERA] sensor-id={sensor_id} 실패")
 
     print("[CAMERA] CSI 카메라 연결 실패 → USB 웹캠(index 0)으로 재시도")
     return cv2.VideoCapture(0)
 
 
-cap = open_camera()
-if not cap.isOpened():
-    raise RuntimeError("카메라를 열 수 없습니다. 연결 상태를 확인하세요.")
+def main():
+    cap = open_camera()
+    if not cap.isOpened():
+        raise RuntimeError("카메라를 열 수 없습니다. 연결 상태를 확인하세요.")
 
-app = Flask(__name__)
+    print("젯슨 화면에 직접 표시합니다. 종료하려면 창을 선택한 뒤 q 를 누르세요.")
 
-
-def generate_frames():
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # COCO 사전학습 모델 - bottle 클래스(39번) 탐지
-        results = model(frame, classes=[39], conf=0.4, verbose=False)
+        # [진단 모드] 모든 클래스 탐지 (GPU 사용 → imgsz 640, conf 낮춤)
+        # 무엇이 잡히는지 터미널에 출력하고, 병(bottle)만 충진율 계산
+        results = model(frame, conf=0.25, imgsz=640, verbose=False)
 
+        detected = []
         for r in results:
             for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cls_id = int(box.cls[0])
+                cls_name = model.names[cls_id]
                 conf = float(box.conf[0])
+                detected.append(f"{cls_name}({conf:.2f})")
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # 잡힌 모든 물체를 파란 박스 + 이름으로 표시 (진단용)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 150, 0), 1)
+                cv2.putText(frame, cls_name, (x1, y2 + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 150, 0), 1)
+
+                # 병이 아니면 충진율 계산 건너뛰기
+                if cls_id != 39:
+                    continue
+
                 fill = get_fill_percent(frame, x1, y1, x2, y2)
 
                 color = (0, 0, 255) if fill >= FILL_THRESHOLD else (0, 255, 0)
@@ -111,24 +133,20 @@ def generate_frames():
                                 0.8, (0, 0, 255), 2)
                     print(f"[SIGNAL] 95% 도달 → 터릿 회전")
 
-        ok, buffer = cv2.imencode('.jpg', frame)
-        if not ok:
-            continue
+        # [진단] 이번 프레임에 잡힌 물체들을 터미널에 출력
+        if detected:
+            print("탐지:", ", ".join(detected))
+        else:
+            print("탐지: (없음)")
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        cv2.imshow("FILL:N - Fill Level Detector", frame)
 
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-@app.route('/')
-def index():
-    return '<html><body><h1>FILL:N - Fill Level Detector</h1><img src="/stream"></body></html>'
-
-
-@app.route('/stream')
-def stream():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
-    print("브라우저에서 http://<젯슨 IP>:5000 접속하여 확인하세요 (종료: Ctrl+C)")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    main()
