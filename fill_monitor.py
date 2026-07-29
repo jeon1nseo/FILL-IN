@@ -18,12 +18,14 @@ import cv2
 import numpy as np
 import os
 import json
+import time
 from datetime import datetime
 from dataclasses import dataclass
 from collections import deque
 
 SAVE_DIR = "results"           # 결과 이미지 저장 폴더
 CONFIG_PATH = "fill_config.json"  # 캘리브레이션 설정 저장 파일
+RATE_WINDOW_S = 1.0            # 충진 속도(mL/s) 계산에 쓸 시간 창(초)
 CAPACITY_ML = 100.0       # 병 전체 용량(mL) — ROI가 가득 찼을 때의 액체량
 STABILITY_WINDOW = 10     # 신뢰도(안정성) 계산에 쓸 최근 프레임 수
 
@@ -301,6 +303,7 @@ def main():
     print("모니터링 시작. (r:다시설정  j/k:밝기  n/m:표면  s:사진  w:설정저장  q:종료)")
     reached = 0
     fills = deque(maxlen=STABILITY_WINDOW)   # 신뢰도 안정성 계산용
+    lvl_hist = deque()                       # 충진 속도 계산용 (시간, mL)
 
     while True:
         ret, frame = read_frame(cap)
@@ -311,6 +314,19 @@ def main():
 
         # ---- VisionSample 로 내보낼 값 계산 ----
         lvl = round(fill / 100.0 * CAPACITY_ML, 2)          # 충진율 → mL
+
+        # ---- 충진 속도(mL/s) 계산: 최근 RATE_WINDOW_S초 동안의 mL 변화량 ----
+        now = time.monotonic()
+        lvl_hist.append((now, lvl))
+        while lvl_hist and now - lvl_hist[0][0] > RATE_WINDOW_S:
+            lvl_hist.popleft()
+        if len(lvl_hist) >= 2:
+            dt = lvl_hist[-1][0] - lvl_hist[0][0]
+            rate = (lvl_hist[-1][1] - lvl_hist[0][1]) / dt if dt > 0 else 0.0
+        else:
+            rate = 0.0
+        rate = max(0.0, rate)   # 채워지는 중이므로 음수는 0으로
+
         fills.append(fill)
         if len(fills) >= 3:
             stability = float(np.clip(1.0 - np.std(fills) / 15.0, 0.0, 1.0))
@@ -319,7 +335,7 @@ def main():
         cb = round(0.5 * clarity + 0.5 * stability, 2)      # LVL 신뢰도(0~1)
         sample = VisionSample(lvl=lvl, cb=cb)
         # 다른 파트(GAP/BAR/DZ)와 합쳐지거나 하강 판단에 쓰이도록 내보냄
-        print(f"LVL={lvl:.2f}mL  CB={cb:.2f}  (fill={fill:.1f}%)")
+        print(f"LVL={lvl:.2f}mL  속도={rate:.2f}mL/s  CB={cb:.2f}  (fill={fill:.1f}%)")
 
         # 연속 도달 확인 (노이즈 방지)
         if fill >= FILL_THRESHOLD:
@@ -336,6 +352,8 @@ def main():
                     (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.putText(frame, f"LVL={lvl:.1f}mL  CB={cb:.2f}",
                     (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame, f"speed={rate:.2f} mL/s",
+                    (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
         cv2.imshow("FILL:N - Fill Monitor", frame)
 
         # 디버그: 흰색으로 검출된 부분(마스크) 보기 — 흰 부분이 실제 크림과 맞는지 확인
